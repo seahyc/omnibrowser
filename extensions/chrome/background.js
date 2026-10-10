@@ -57,7 +57,18 @@ function sendToHost(message) {
 // ============================================================================
 
 async function handleNativeMessage(message) {
-  const { id, action, params } = message;
+  const { id, action, params, type } = message;
+
+  // Ignore response messages (handshake_ack, etc.)
+  if (type === "handshake_ack") {
+    console.log("[OmniBrowser] Handshake acknowledged, connected!");
+    return;
+  }
+
+  // Ignore messages without an action (these are responses, not commands)
+  if (!action) {
+    return;
+  }
 
   try {
     let result;

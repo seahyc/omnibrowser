@@ -7,12 +7,56 @@ Commands:
     omnibrowser install-host       Install native messaging host
     omnibrowser profiles           List Chrome profiles
     omnibrowser instances          List running Chrome instances with debug ports
+    omnibrowser tabs               List tabs via Chrome extension
+    omnibrowser screenshot         Take screenshot via Chrome extension
 """
 
 import argparse
 import asyncio
+import json
+import socket
+import struct
 import sys
 from pathlib import Path
+
+SOCKET_PATH = Path("/tmp/omnibrowser.sock")
+
+
+def send_to_extension(action, params=None, timeout=30):
+    """Send a command to the extension via the native host socket."""
+    if not SOCKET_PATH.exists():
+        print("Error: OmniBrowser native host is not running.")
+        print("Make sure the Chrome extension is loaded and connected.")
+        sys.exit(1)
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+
+    try:
+        sock.connect(str(SOCKET_PATH))
+
+        # Send command
+        message = {"action": action, "params": params or {}}
+        data = json.dumps(message).encode("utf-8")
+        sock.send(struct.pack("!I", len(data)))
+        sock.send(data)
+
+        # Read response
+        length_data = sock.recv(4)
+        if not length_data:
+            return None
+        msg_length = struct.unpack("!I", length_data)[0]
+        response_data = sock.recv(msg_length).decode("utf-8")
+        return json.loads(response_data)
+
+    except socket.timeout:
+        print("Error: Timeout waiting for extension response")
+        sys.exit(1)
+    except ConnectionRefusedError:
+        print("Error: Could not connect to native host socket")
+        sys.exit(1)
+    finally:
+        sock.close()
 
 
 def cmd_install_host(args):
@@ -180,6 +224,112 @@ def cmd_connect(args):
     asyncio.run(interactive())
 
 
+# ============================================================================
+# Extension Commands (via Native Messaging)
+# ============================================================================
+
+def cmd_tabs(args):
+    """List tabs via the Chrome extension."""
+    response = send_to_extension("getTabs")
+
+    if not response:
+        print("No response from extension")
+        return
+
+    if not response.get("success"):
+        print(f"Error: {response.get('error')}")
+        return
+
+    tabs = response.get("result", [])
+    if not tabs:
+        print("No tabs found")
+        return
+
+    print(f"Found {len(tabs)} tabs:\n")
+    for tab in tabs:
+        active = "*" if tab.get("active") else " "
+        title = tab.get("title", "Untitled")[:50]
+        url = tab.get("url", "")[:60]
+        print(f"  {active}[{tab['id']}] {title}")
+        print(f"         {url}")
+
+
+def cmd_screenshot_ext(args):
+    """Take a screenshot via the Chrome extension."""
+    import base64
+
+    tab_id = args.tab_id
+
+    # If no tab ID, get active tab
+    if not tab_id:
+        response = send_to_extension("getActiveTab")
+        if response.get("success") and response.get("result"):
+            tab_id = response["result"]["id"]
+        else:
+            print("Error: Could not get active tab. Specify --tab-id")
+            return
+
+    response = send_to_extension("screenshot", {"tabId": tab_id})
+
+    if not response.get("success"):
+        print(f"Error: {response.get('error')}")
+        return
+
+    result = response.get("result", {})
+    screenshot_data = result.get("screenshot")
+
+    if not screenshot_data:
+        print("No screenshot data received")
+        return
+
+    # Save to file
+    output = args.output or f"screenshot_{tab_id}.png"
+    with open(output, "wb") as f:
+        f.write(base64.b64decode(screenshot_data))
+
+    print(f"Screenshot saved to: {output}")
+
+
+def cmd_navigate(args):
+    """Navigate a tab to a URL."""
+    tab_id = args.tab_id
+    url = args.url
+
+    # If no tab ID, get active tab
+    if not tab_id:
+        response = send_to_extension("getActiveTab")
+        if response.get("success") and response.get("result"):
+            tab_id = response["result"]["id"]
+        else:
+            print("Error: Could not get active tab. Specify --tab-id")
+            return
+
+    response = send_to_extension("navigate", {"tabId": tab_id, "url": url})
+
+    if not response.get("success"):
+        print(f"Error: {response.get('error')}")
+        return
+
+    print(f"Navigated tab {tab_id} to {url}")
+
+
+def cmd_ping(args):
+    """Ping the extension to test connectivity."""
+    response = send_to_extension("ping")
+
+    if not response:
+        print("No response from extension")
+        return
+
+    if response.get("success"):
+        result = response.get("result", {})
+        print(f"Pong! Extension responded.")
+        if "timestamp" in result:
+            print(f"  Timestamp: {result['timestamp']}")
+    else:
+        print(f"Error: {response.get('error')}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="OmniBrowser - Multi-profile browser automation for AI agents"
@@ -222,6 +372,54 @@ def main():
         help="Chrome debug port to connect to"
     )
     connect_parser.set_defaults(func=cmd_connect)
+
+    # Extension commands (via Native Messaging)
+
+    # tabs command
+    tabs_parser = subparsers.add_parser(
+        "tabs",
+        help="List tabs via Chrome extension"
+    )
+    tabs_parser.set_defaults(func=cmd_tabs)
+
+    # screenshot command
+    screenshot_parser = subparsers.add_parser(
+        "screenshot",
+        help="Take screenshot via Chrome extension"
+    )
+    screenshot_parser.add_argument(
+        "--tab-id", "-t",
+        type=int,
+        help="Tab ID to screenshot (default: active tab)"
+    )
+    screenshot_parser.add_argument(
+        "--output", "-o",
+        help="Output file path"
+    )
+    screenshot_parser.set_defaults(func=cmd_screenshot_ext)
+
+    # navigate command
+    navigate_parser = subparsers.add_parser(
+        "navigate",
+        help="Navigate a tab to a URL"
+    )
+    navigate_parser.add_argument(
+        "url",
+        help="URL to navigate to"
+    )
+    navigate_parser.add_argument(
+        "--tab-id", "-t",
+        type=int,
+        help="Tab ID to navigate (default: active tab)"
+    )
+    navigate_parser.set_defaults(func=cmd_navigate)
+
+    # ping command
+    ping_parser = subparsers.add_parser(
+        "ping",
+        help="Test connection to Chrome extension"
+    )
+    ping_parser.set_defaults(func=cmd_ping)
 
     args = parser.parse_args()
 

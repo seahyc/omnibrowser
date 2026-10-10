@@ -7,12 +7,17 @@ Supports Chrome, Edge, Arc, Brave, Dia.
 
 __version__ = "0.1.0"
 
-from omnibrowser.adapters.chrome import (
-    ChromeAdapter,
-    ChromeProfile,
-    ChromeInstance,
-    CDPClient,
-)
+# Lazy imports to avoid requiring aiohttp for CLI-only usage
+def __getattr__(name):
+    if name in ("ChromeAdapter", "ChromeProfile", "ChromeInstance", "CDPClient"):
+        from omnibrowser.adapters.chrome import (
+            ChromeAdapter,
+            ChromeProfile,
+            ChromeInstance,
+            CDPClient,
+        )
+        return locals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "ChromeAdapter",
